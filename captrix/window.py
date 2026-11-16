@@ -9,7 +9,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk, Pango
+from gi.repository import Adw, Gio, GLib, Gtk
 
 from captrix.stitch import common_prefix_len
 from captrix.watcher import CaptionWatcher, Reading, init_atspi
@@ -47,12 +47,6 @@ class CaptrixWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         header.set_title_widget(self.title)
 
-        self.live_dot = Gtk.Label(label="●")
-        self.live_dot.add_css_class("live-dot")
-        self.live_dot.add_css_class("idle")
-        self.live_dot.set_tooltip_text("Not receiving captions")
-        header.pack_start(self.live_dot)
-
         self.copy_btn = Gtk.Button(label="Copy")
         self.copy_btn.set_tooltip_text(
             "Copy the selection, or the whole transcript if nothing is selected"
@@ -83,24 +77,19 @@ class CaptrixWindow(Adw.ApplicationWindow):
         self.view.set_monospace(False)
 
         self.scrolled = Gtk.ScrolledWindow(vexpand=True)
-        self.scrolled.add_css_class("card")
-        self.scrolled.set_margin_start(12)
-        self.scrolled.set_margin_end(12)
-        self.scrolled.set_margin_top(6)
-        self.scrolled.set_margin_bottom(6)
         self.scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.scrolled.set_child(self.view)
 
-        self.stack = Gtk.Stack()
+        self.stack = Gtk.Stack(vexpand=True)
         self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         self.stack.add_named(self.status_page, "empty")
         self.stack.add_named(self.scrolled, "text")
         self.stack.set_visible_child_name("empty")
 
-        self.hint = Gtk.Label(xalign=0, hexpand=True)
-        self.hint.add_css_class("dim-label")
-        self.hint.set_ellipsize(Pango.EllipsizeMode.END)
-        self.hint.set_text("Waiting for captions")
+        self.panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
+        self.stack.set_hexpand(True)
+        self.panel.add_css_class("transcript-frame")
+        self.panel.append(self.stack)
 
         bottom = Gtk.Box(spacing=6)
         bottom.set_margin_start(10)
@@ -110,11 +99,10 @@ class CaptrixWindow(Adw.ApplicationWindow):
         bottom.append(self.copy_btn)
         bottom.append(self.save_btn)
         bottom.append(self.clear_btn)
-        bottom.append(self.hint)
 
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(header)
-        toolbar.set_content(self.stack)
+        toolbar.set_content(self.panel)
         toolbar.add_bottom_bar(bottom)
 
         toast_overlay = Adw.ToastOverlay()
@@ -141,18 +129,20 @@ class CaptrixWindow(Adw.ApplicationWindow):
         provider = Gtk.CssProvider()
         provider.load_from_string(
             """
+            .transcript-frame {
+              margin: 10px 12px 4px 12px;
+              border-radius: 16px;
+              background-color: @card_bg_color;
+              border: 1px solid alpha(@window_fg_color, 0.28);
+              box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.08);
+            }
+            .transcript-frame statuspage {
+              background: transparent;
+            }
             textview.transcript,
             textview.transcript text {
               background: transparent;
               font-size: 16pt;
-            }
-            .live-dot {
-              color: #2ec27e;
-              font-size: 10pt;
-              margin-left: 6px;
-            }
-            .live-dot.idle {
-              color: alpha(@window_fg_color, 0.35);
             }
             """
         )
@@ -186,13 +176,6 @@ class CaptrixWindow(Adw.ApplicationWindow):
 
     def _update_chrome(self, reading: Reading) -> None:
         capturing = reading.phase == "capturing"
-        if capturing:
-            self.live_dot.remove_css_class("idle")
-            self.live_dot.set_tooltip_text("Receiving captions")
-        else:
-            self.live_dot.add_css_class("idle")
-            self.live_dot.set_tooltip_text("Not receiving captions")
-
         words = len(reading.transcript.split()) if reading.transcript else 0
         word_label = "1 word" if words == 1 else f"{words} words"
         if capturing:
@@ -225,16 +208,6 @@ class CaptrixWindow(Adw.ApplicationWindow):
         self.status_page.set_title(title)
         self.status_page.set_description(description)
         self.status_page.set_icon_name(icon)
-
-        if reading.transcript or capturing:
-            hint = "Select text, then Ctrl+C"
-        elif reading.notice:
-            hint = reading.notice
-        elif reading.phase == "no-browser":
-            hint = "Open Google Chrome to start catching captions."
-        else:
-            hint = "Play a meeting or a video with Live Caption turned on."
-        self.hint.set_text(hint)
 
     def _show_transcript(self, text: str) -> None:
         if text == self._shown:
