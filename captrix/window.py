@@ -14,8 +14,9 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk
+from gi.repository import Adw, Gio, GLib, Gtk, Pango
 
+from captrix.appearance import load_font, save_font, transcript_css
 from captrix.binding import Shortcut, load_shortcut, save_shortcut, uses_left_button
 from captrix.chord import HotkeyWatch
 from captrix.send import paste_and_enter, remove_send_shortcut
@@ -96,6 +97,7 @@ class CaptrixWindow(Adw.ApplicationWindow):
         super().__init__(**kwargs)
         self.watcher = watcher
         self.shortcut = load_shortcut()
+        self.font = load_font()
         self._shortcut_window: ShortcutWindow | None = None
         self._capturing = False
         self.set_title("Captrix")
@@ -168,6 +170,14 @@ class CaptrixWindow(Adw.ApplicationWindow):
         bottom.append(self.copy_btn)
         bottom.append(self.save_btn)
         bottom.append(self.clear_btn)
+        self.font_btn = Gtk.FontButton()
+        self.font_btn.set_tooltip_text("Transcript font, style, and size")
+        self.font_btn.set_title("Transcript font")
+        self.font_btn.set_use_font(False)
+        self.font_btn.set_use_size(False)
+        self.font_btn.set_font_desc(Pango.FontDescription.from_string(self.font))
+        self.font_btn.connect("font-set", self._on_font_set)
+        bottom.append(self.font_btn)
         self.shortcut_btn = Gtk.Button(label=self.shortcut.label)
         self.shortcut_btn.add_css_class("flat")
         self.shortcut_btn.set_hexpand(True)
@@ -226,18 +236,32 @@ class CaptrixWindow(Adw.ApplicationWindow):
             .transcript-frame statuspage {
               background: transparent;
             }
-            textview.transcript,
-            textview.transcript text {
-              background: transparent;
-              font-size: 16pt;
-            }
             """
         )
+        display = self.get_display()
         Gtk.StyleContext.add_provider_for_display(
-            self.get_display(),
+            display,
             provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
+        self._font_provider = Gtk.CssProvider()
+        self._apply_font_css()
+        Gtk.StyleContext.add_provider_for_display(
+            display,
+            self._font_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+        )
+
+    def _apply_font_css(self) -> None:
+        self._font_provider.load_from_string(transcript_css(self.font))
+
+    def _on_font_set(self, button: Gtk.FontButton) -> None:
+        description = button.get_font_desc()
+        if description is None:
+            return
+        self.font = description.to_string()
+        save_font(self.font)
+        self._apply_font_css()
 
     def _tick(self) -> bool:
         try:
