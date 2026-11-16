@@ -1,12 +1,14 @@
 [Desktop Entry]
+Version=1.0
 Type=Application
 Name=Captrix
 GenericName=Caption catcher
 Comment=Catch Google Live Caption text into a panel you can copy
-Exec=/media/midas/798e0e95-dd63-4b39-a06d-b028eaafd82d/Captrix-Ubuntu/run.sh
-Path=/media/midas/798e0e95-dd63-4b39-a06d-b028eaafd82d/Captrix-Ubuntu
-Icon=media-view-subtitles-symbolic
+Exec=@ROOT@/bin/captrix
+Path=@ROOT@
+Icon=@ROOT@/data/icons/com.captrix.Captrix.svg
 Terminal=false
 Categories=Utility;Accessibility;
+Keywords=caption;subtitles;transcript;chrome;
 StartupNotify=true
 StartupWMClass=com.captrix.Captrix

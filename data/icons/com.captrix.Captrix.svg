@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Captrix">
+  <rect width="128" height="128" rx="28" fill="#1e2430"/>
+  <rect x="16" y="24" width="96" height="80" rx="18" fill="#2c3544"/>
+  <circle cx="36" cy="46" r="6" fill="#2ec27e"/>
+  <rect x="50" y="41" width="44" height="10" rx="5" fill="#f4f6f8"/>
+  <rect x="30" y="62" width="68" height="7" rx="3.5" fill="#d5dbe3"/>
+  <rect x="30" y="76" width="52" height="7" rx="3.5" fill="#9aa6b5"/>
+</svg>
