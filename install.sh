@@ -63,3 +63,9 @@ echo "Captrix is installed for this user."
 echo "Open it from the app grid. If it does not appear, log out and back in."
 echo "The captrix command is $BIN_DIR/captrix"
 echo "If you move this folder, run ./install.sh again."
+if ! id -nG "$USER" | grep -qw input; then
+  echo
+  echo "The paste shortcut needs the input group."
+  echo "  sudo usermod -aG input \"$USER\""
+  echo "Then log out and back in."
+fi

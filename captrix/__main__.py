@@ -30,6 +30,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print one reading from the Live Caption bubble and exit.",
     )
+    parser.add_argument(
+        "--send",
+        action="store_true",
+        help="Paste the selected caption into the focused field and press Enter.",
+    )
     args = parser.parse_args(argv)
     if args.once:
         return _print_once()

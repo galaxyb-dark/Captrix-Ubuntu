@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +16,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
 
+from captrix.binding import Shortcut, load_shortcut, save_shortcut, uses_left_button
+from captrix.chord import HotkeyWatch
+from captrix.send import paste_and_enter, remove_send_shortcut
 from captrix.stitch import common_prefix_len
 from captrix.watcher import CaptionWatcher, Reading, init_atspi
 
@@ -24,7 +32,7 @@ EMPTY_COPY = {
     ),
     "waiting": (
         "Waiting for captions",
-        "When the Google Live Caption bubble pops up over a meeting or a video, the words will collect here. You can select them and copy.\n\nTurn it on in Chrome: Settings → Accessibility → Live Caption. Then play some audio.",
+        "When the Google Live Caption bubble pops up over a meeting or a video, the words will collect here. Select the part you want, click the other field, then press the shortcut. The gear button opens the shortcut panel: click it, then press the key you want.\n\nTurn it on in Chrome: Settings → Accessibility → Live Caption. Then play some audio.",
         "media-view-subtitles-symbolic",
     ),
     "notice": (
@@ -35,10 +43,61 @@ EMPTY_COPY = {
 }
 
 
+class ShortcutWindow(Adw.PreferencesWindow):
+    def __init__(self, owner: CaptrixWindow) -> None:
+        super().__init__(title="Shortcut")
+        self.owner = owner
+        self.set_transient_for(owner)
+        self.set_modal(True)
+        self.set_search_enabled(False)
+        self.set_default_size(480, 300)
+        self.connect("close-request", self._on_close)
+
+        page = Adw.PreferencesPage()
+        group = Adw.PreferencesGroup(
+            title="Paste and send",
+            description=(
+                "Select the caption text, click the field you want, then press this shortcut. "
+                "Captrix pastes the selection and presses Enter."
+            ),
+        )
+        self.row = Adw.ActionRow(title="Shortcut")
+        self.button = Gtk.Button()
+        self.button.connect("clicked", lambda *_: owner.begin_capture())
+        self.row.add_suffix(self.button)
+        self.row.set_activatable_widget(self.button)
+        group.add(self.row)
+        page.add(group)
+        self.add(page)
+        self.refresh()
+
+    def refresh(self) -> None:
+        if self.owner._capturing:
+            self.button.set_label("Press a shortcut…")
+            self.button.add_css_class("suggested-action")
+            self.row.set_subtitle("Press the key you want. Esc cancels.")
+            return
+        self.button.set_label(self.owner.shortcut.label)
+        self.button.remove_css_class("suggested-action")
+        self.row.set_subtitle("Click here, then press the key you want. It is saved like a game bind.")
+
+    def _on_close(self, window) -> bool:
+        # Hide it ourselves. A second open/close cycle was leaving this dialog up
+        # after the shortcut had already been saved.
+        owner = self.owner
+        owner._shortcut_window = None
+        owner.cancel_capture()
+        GLib.idle_add(window.destroy)
+        return True
+
+
 class CaptrixWindow(Adw.ApplicationWindow):
     def __init__(self, watcher: CaptionWatcher, **kwargs):
         super().__init__(**kwargs)
         self.watcher = watcher
+        self.shortcut = load_shortcut()
+        self._shortcut_window: ShortcutWindow | None = None
+        self._capturing = False
         self.set_title("Captrix")
         self.set_default_size(520, 720)
         self._apply_css()
@@ -46,6 +105,11 @@ class CaptrixWindow(Adw.ApplicationWindow):
         self.title = Adw.WindowTitle.new("Captrix", "Looking for Google captions")
         header = Adw.HeaderBar()
         header.set_title_widget(self.title)
+        gear = Gtk.Button.new_from_icon_name("emblem-system-symbolic")
+        gear.add_css_class("flat")
+        gear.set_tooltip_text("Change the paste shortcut")
+        gear.connect("clicked", lambda *_: self.open_shortcut())
+        header.pack_end(gear)
 
         self.copy_btn = Gtk.Button(label="Copy")
         self.copy_btn.set_tooltip_text(
@@ -75,6 +139,11 @@ class CaptrixWindow(Adw.ApplicationWindow):
         )
         self.view.add_css_class("transcript")
         self.view.set_monospace(False)
+        self.buffer.connect("mark-set", self._remember_selection)
+        focus = Gtk.EventControllerFocus()
+        focus.connect("leave", self._remember_selection)
+        self.view.add_controller(focus)
+        self._send_text = ""
 
         self.scrolled = Gtk.ScrolledWindow(vexpand=True)
         self.scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -99,6 +168,13 @@ class CaptrixWindow(Adw.ApplicationWindow):
         bottom.append(self.copy_btn)
         bottom.append(self.save_btn)
         bottom.append(self.clear_btn)
+        self.shortcut_btn = Gtk.Button(label=self.shortcut.label)
+        self.shortcut_btn.add_css_class("flat")
+        self.shortcut_btn.set_hexpand(True)
+        self.shortcut_btn.set_halign(Gtk.Align.END)
+        self.shortcut_btn.set_tooltip_text("Change the paste shortcut")
+        self.shortcut_btn.connect("clicked", lambda *_: self.open_shortcut())
+        bottom.append(self.shortcut_btn)
 
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(header)
@@ -122,8 +198,19 @@ class CaptrixWindow(Adw.ApplicationWindow):
 
         self._shown = ""
         self._save_folder = None
+        self._dismiss_menu = False
+        self._hotkeys = HotkeyWatch(
+            self.shortcut.keys,
+            self._on_hotkey,
+            self._on_shortcut_captured,
+            self._on_capture_cancelled,
+        )
+        button_error = self._hotkeys.start()
+        self.connect("destroy", self._on_destroy)
         self._refresh()
         GLib.timeout_add(POLL_MS, self._tick)
+        if button_error:
+            GLib.idle_add(self._report_send_error, button_error)
 
     def _apply_css(self) -> None:
         provider = Gtk.CssProvider()
@@ -262,7 +349,129 @@ class CaptrixWindow(Adw.ApplicationWindow):
         self.get_clipboard().set(text)
         self.toast_overlay.add_toast(Adw.Toast.new(toast))
 
+    def _remember_selection(self, *_args) -> None:
+        bounds = self.buffer.get_selection_bounds() or ()
+        if len(bounds) != 2:
+            return
+        start, end = bounds
+        text = self.buffer.get_text(start, end, True).strip()
+        if not text or text == self._send_text:
+            return
+        self._send_text = text
+        # Publish while this window is still focused. A later paste can then
+        # read it after the click has moved focus to the other field.
+        self.get_clipboard().set(text)
+
+    def _on_destroy(self, *_args) -> None:
+        self._hotkeys.stop()
+        if self._shortcut_window is not None:
+            self._shortcut_window.destroy()
+
+    def open_shortcut(self) -> None:
+        if self._shortcut_window is None:
+            self._shortcut_window = ShortcutWindow(self)
+            self._shortcut_window.connect("destroy", self._on_shortcut_window_destroyed)
+        self._shortcut_window.present()
+        self.begin_capture()
+
+    def _on_shortcut_window_destroyed(self, *_args) -> None:
+        self._shortcut_window = None
+
+    def begin_capture(self) -> None:
+        self._capturing = True
+        self._set_capture_accels(True)
+        self._hotkeys.begin_capture()
+        self._refresh_shortcut_widgets()
+
+    def cancel_capture(self) -> None:
+        self._hotkeys.cancel_capture()
+        self._capturing = False
+        self._set_capture_accels(False)
+        self._refresh_shortcut_widgets()
+
+    def _on_hotkey(self, dismiss_menu: bool) -> bool:
+        if not self._capturing:
+            self.send_to_focused_field(bool(dismiss_menu))
+        return False
+
+    def _on_shortcut_captured(self, keys) -> bool:
+        if uses_left_button(keys):
+            return False
+        self.shortcut = Shortcut(keys)
+        save_shortcut(self.shortcut)
+        self._hotkeys.set_binding(self.shortcut.keys)
+        self._capturing = False
+        self._set_capture_accels(False)
+        self._refresh_shortcut_widgets()
+        self.toast_overlay.add_toast(Adw.Toast.new(f"Shortcut set to {self.shortcut.label}"))
+        if self._shortcut_window is not None:
+            self._shortcut_window.close()
+        return False
+
+    def _on_capture_cancelled(self) -> bool:
+        self._capturing = False
+        self._set_capture_accels(False)
+        self._refresh_shortcut_widgets()
+        return False
+
+    def _refresh_shortcut_widgets(self) -> None:
+        self.shortcut_btn.set_label("Press a shortcut…" if self._capturing else self.shortcut.label)
+        if self._shortcut_window is not None:
+            self._shortcut_window.refresh()
+
+    def _set_capture_accels(self, capturing: bool) -> None:
+        app = self.get_application()
+        if app is None:
+            return
+        if capturing:
+            app.set_accels_for_action("app.quit", [])
+            app.set_accels_for_action("win.copy-all", [])
+            app.set_accels_for_action("win.save", [])
+            app.set_accels_for_action("win.clear", [])
+            return
+        app.set_accels_for_action("app.quit", ["<Control>q"])
+        app.set_accels_for_action("win.copy-all", ["<Control><Shift>c"])
+        app.set_accels_for_action("win.save", ["<Control>s"])
+        app.set_accels_for_action("win.clear", ["<Control><Shift>BackSpace"])
+
+    def send_to_focused_field(self, dismiss_menu: bool = False) -> None:
+        text = self._selected_text().strip()
+        if not text:
+            self._report_send_error("Select the caption text first.")
+            return
+        self._send_text = text
+        self._dismiss_menu = bool(dismiss_menu)
+        self.get_clipboard().set(text)
+        threading.Thread(target=self._paste_when_ready, daemon=True).start()
+
+    def _selected_text(self) -> str:
+        bounds = self.buffer.get_selection_bounds() or ()
+        if len(bounds) == 2:
+            start, end = bounds
+            text = self.buffer.get_text(start, end, True)
+            if text.strip():
+                return text
+        return self._send_text
+
+    def _paste_when_ready(self) -> None:
+        # Ctrl+V asks Captrix for the clipboard on the main loop, so the
+        # key press has to wait on this thread until that loop is free.
+        time.sleep(0.32)
+        error = paste_and_enter(self._send_text, dismiss_menu=self._dismiss_menu)
+        if error:
+            GLib.idle_add(self._report_send_error, error)
+
+    def _report_send_error(self, message: str) -> bool:
+        self.toast_overlay.add_toast(Adw.Toast.new(message))
+        if shutil.which("notify-send"):
+            subprocess.run(
+                ["notify-send", "-a", "Captrix", "Captrix", message],
+                check=False,
+            )
+        return False
+
     def clear_text(self) -> None:
+        self._send_text = ""
         if not self.watcher.transcript:
             return
         self.watcher.clear()
@@ -334,13 +543,24 @@ class CaptrixApplication(Adw.Application):
     def __init__(self):
         super().__init__(
             application_id="com.captrix.Captrix",
-            flags=Gio.ApplicationFlags.DEFAULT_FLAGS,
+            flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE,
         )
         self.watcher = CaptionWatcher()
+        self.send_label = "Left + right click"
+        self._window: CaptrixWindow | None = None
         self.connect("startup", self._on_startup)
         self.connect("activate", self._on_activate)
 
+    def do_command_line(self, command_line: Gio.ApplicationCommandLine) -> int:
+        return self._on_command_line(self, command_line)
+
     def _on_startup(self, _app) -> None:
+        try:
+            remove_send_shortcut()
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
         init_atspi()
         quit_action = Gio.SimpleAction.new("quit", None)
         quit_action.connect("activate", lambda *_: self.quit())
@@ -352,11 +572,30 @@ class CaptrixApplication(Adw.Application):
 
     def _on_activate(self, _app) -> None:
         window = self.props.active_window
-        if window is None:
+        if not isinstance(window, CaptrixWindow):
             window = CaptrixWindow(self.watcher, application=self)
+        # Keep a Python reference. Without it the window can be collected
+        # and the process exits while the user still expects it to be open.
+        self._window = window
         window.present()
+
+    def _on_command_line(self, _app, command_line: Gio.ApplicationCommandLine) -> int:
+        arguments = command_line.get_arguments()
+        if "--send" in arguments:
+            window = self.props.active_window
+            if isinstance(window, CaptrixWindow):
+                # The field the user clicked keeps focus. Raising Captrix
+                # would paste the selection into the caption panel.
+                window.send_to_focused_field()
+            else:
+                self.activate()
+            command_line.set_exit_status(0)
+            return 0
+        self.activate()
+        command_line.set_exit_status(0)
+        return 0
 
 
 def run_window() -> int:
     app = CaptrixApplication()
-    return app.run(None)
+    return app.run(sys.argv)
