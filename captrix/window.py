@@ -44,52 +44,61 @@ EMPTY_COPY = {
 }
 
 
-class ShortcutWindow(Adw.PreferencesWindow):
+class ShortcutWindow(Adw.Dialog):
     def __init__(self, owner: CaptrixWindow) -> None:
-        super().__init__(title="Shortcut")
+        super().__init__()
         self.owner = owner
-        self.set_transient_for(owner)
-        self.set_modal(True)
-        self.set_search_enabled(False)
-        self.set_default_size(480, 300)
-        self.connect("close-request", self._on_close)
+        self.set_title("Shortcut")
+        self.set_content_width(380)
+        self.set_follows_content_size(True)
+        self.set_presentation_mode(Adw.DialogPresentationMode.FLOATING)
 
-        page = Adw.PreferencesPage()
-        group = Adw.PreferencesGroup(
-            title="Paste and send",
-            description=(
-                "Select the caption text, click the field you want, then press this shortcut. "
-                "Captrix pastes the selection and presses Enter."
-            ),
-        )
-        self.row = Adw.ActionRow(title="Shortcut")
+        title = Gtk.Label(label="Shortcut")
+        title.add_css_class("title")
+        header = Adw.HeaderBar()
+        header.add_css_class("flat")
+        header.set_title_widget(title)
+        header.set_show_end_title_buttons(False)
+        close = Gtk.Button.new_from_icon_name("window-close-symbolic")
+        close.add_css_class("flat")
+        close.set_tooltip_text("Close")
+        close.connect("clicked", lambda *_: self.close())
+        header.pack_end(close)
+
+        name = Gtk.Label(label="Shortcut", xalign=0)
+        name.add_css_class("heading")
+        name.set_hexpand(True)
         self.button = Gtk.Button()
+        self.button.add_css_class("pill")
+        self.button.add_css_class("shortcut-key")
+        self.button.set_halign(Gtk.Align.END)
+        self.button.set_valign(Gtk.Align.CENTER)
         self.button.connect("clicked", lambda *_: owner.begin_capture())
-        self.row.add_suffix(self.button)
-        self.row.set_activatable_widget(self.button)
-        group.add(self.row)
-        page.add(group)
-        self.add(page)
+
+        card = Gtk.Box(spacing=12)
+        card.add_css_class("shortcut-card")
+        card.append(name)
+        card.append(self.button)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        content.append(header)
+        content.append(card)
+        self.set_child(content)
+        self.connect("closed", self._on_closed)
         self.refresh()
 
     def refresh(self) -> None:
-        if self.owner._capturing:
-            self.button.set_label("Press a shortcut…")
-            self.button.add_css_class("suggested-action")
-            self.row.set_subtitle("Press the key you want. Esc cancels.")
-            return
         self.button.set_label(self.owner.shortcut.label)
-        self.button.remove_css_class("suggested-action")
-        self.row.set_subtitle("Click here, then press the key you want. It is saved like a game bind.")
+        if self.owner._capturing:
+            self.button.add_css_class("listening")
+        else:
+            self.button.remove_css_class("listening")
 
-    def _on_close(self, window) -> bool:
-        # Hide it ourselves. A second open/close cycle was leaving this dialog up
-        # after the shortcut had already been saved.
+    def _on_closed(self, *_args) -> None:
         owner = self.owner
-        owner._shortcut_window = None
+        if owner._shortcut_window is self:
+            owner._shortcut_window = None
         owner.cancel_capture()
-        GLib.idle_add(window.destroy)
-        return True
 
 
 class CaptrixWindow(Adw.ApplicationWindow):
@@ -170,19 +179,15 @@ class CaptrixWindow(Adw.ApplicationWindow):
         bottom.append(self.copy_btn)
         bottom.append(self.save_btn)
         bottom.append(self.clear_btn)
-        self.font_btn = Gtk.FontButton()
-        self.font_btn.set_tooltip_text("Transcript font, style, and size")
-        self.font_btn.set_title("Transcript font")
-        self.font_btn.set_use_font(False)
-        self.font_btn.set_use_size(False)
-        self.font_btn.set_font_desc(Pango.FontDescription.from_string(self.font))
-        self.font_btn.connect("font-set", self._on_font_set)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        bottom.append(spacer)
+        self.font_btn = Gtk.Button.new_from_icon_name("preferences-desktop-font-symbolic")
+        self.font_btn.set_tooltip_text(f"Font: {self.font}")
+        self.font_btn.connect("clicked", self._choose_font)
         bottom.append(self.font_btn)
-        self.shortcut_btn = Gtk.Button(label=self.shortcut.label)
-        self.shortcut_btn.add_css_class("flat")
-        self.shortcut_btn.set_hexpand(True)
-        self.shortcut_btn.set_halign(Gtk.Align.END)
-        self.shortcut_btn.set_tooltip_text("Change the paste shortcut")
+        self.shortcut_btn = Gtk.Button.new_from_icon_name(self._shortcut_icon())
+        self.shortcut_btn.set_tooltip_text(f"Shortcut: {self.shortcut.label}")
         self.shortcut_btn.connect("clicked", lambda *_: self.open_shortcut())
         bottom.append(self.shortcut_btn)
 
@@ -236,6 +241,24 @@ class CaptrixWindow(Adw.ApplicationWindow):
             .transcript-frame statuspage {
               background: transparent;
             }
+            .shortcut-card {
+              margin: 2px 16px 16px 16px;
+              padding: 12px 12px 12px 16px;
+              border-radius: 14px;
+              background-color: @card_bg_color;
+              border: 1px solid alpha(@window_fg_color, 0.16);
+            }
+            .shortcut-key {
+              min-width: 132px;
+              min-height: 36px;
+              padding: 4px 16px;
+              font-weight: 600;
+            }
+            .shortcut-key.listening {
+              background-color: alpha(@accent_bg_color, 0.18);
+              color: @accent_color;
+              box-shadow: inset 0 0 0 1px alpha(@accent_bg_color, 0.7);
+            }
             """
         )
         display = self.get_display()
@@ -255,13 +278,32 @@ class CaptrixWindow(Adw.ApplicationWindow):
     def _apply_font_css(self) -> None:
         self._font_provider.load_from_string(transcript_css(self.font))
 
-    def _on_font_set(self, button: Gtk.FontButton) -> None:
-        description = button.get_font_desc()
+    def _choose_font(self, *_args) -> None:
+        dialog = Gtk.FontDialog()
+        dialog.set_title("Transcript font")
+        dialog.choose_font(
+            self,
+            Pango.FontDescription.from_string(self.font),
+            None,
+            self._on_font_chosen,
+        )
+
+    def _on_font_chosen(self, dialog: Gtk.FontDialog, result: Gio.AsyncResult) -> None:
+        try:
+            description = dialog.choose_font_finish(result)
+        except GLib.Error:
+            return
         if description is None:
             return
         self.font = description.to_string()
         save_font(self.font)
         self._apply_font_css()
+        self.font_btn.set_tooltip_text(f"Font: {self.font}")
+
+    def _shortcut_icon(self) -> str:
+        if any(0x110 <= code <= 0x117 for code in self.shortcut.keys):
+            return "input-mouse-symbolic"
+        return "input-keyboard-symbolic"
 
     def _tick(self) -> bool:
         try:
@@ -389,17 +431,13 @@ class CaptrixWindow(Adw.ApplicationWindow):
     def _on_destroy(self, *_args) -> None:
         self._hotkeys.stop()
         if self._shortcut_window is not None:
-            self._shortcut_window.destroy()
+            self._shortcut_window.force_close()
 
     def open_shortcut(self) -> None:
         if self._shortcut_window is None:
             self._shortcut_window = ShortcutWindow(self)
-            self._shortcut_window.connect("destroy", self._on_shortcut_window_destroyed)
-        self._shortcut_window.present()
+        self._shortcut_window.present(self)
         self.begin_capture()
-
-    def _on_shortcut_window_destroyed(self, *_args) -> None:
-        self._shortcut_window = None
 
     def begin_capture(self) -> None:
         self._capturing = True
@@ -439,7 +477,8 @@ class CaptrixWindow(Adw.ApplicationWindow):
         return False
 
     def _refresh_shortcut_widgets(self) -> None:
-        self.shortcut_btn.set_label("Press a shortcut…" if self._capturing else self.shortcut.label)
+        self.shortcut_btn.set_icon_name(self._shortcut_icon())
+        self.shortcut_btn.set_tooltip_text(f"Shortcut: {self.shortcut.label}")
         if self._shortcut_window is not None:
             self._shortcut_window.refresh()
 

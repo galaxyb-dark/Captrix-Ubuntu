@@ -47,26 +47,46 @@ def _best_splice(old_words: list[str], new_words: list[str]) -> int | None:
     """Where `new_words` overlaps `old_words`.
 
     Live Caption keeps a window of recent words and rewrites them as it
-    hears more, so the new window is not an exact tail of the old one.
-    Matching words, not raw characters, lets those corrections land in
-    place instead of pasting the window again.
+    hears more. Inserted words ("gonna" becoming "going to") shift every
+    match after them, so later matches do not share one offset. Anchor on
+    the first overlap and count later matches that still sit on that same
+    rewrite, instead of pasting the window again.
     """
     if not old_words or not new_words:
         return None
     old_keys = [_word_key(word) for word in old_words]
     new_keys = [_word_key(word) for word in new_words]
     matcher = difflib.SequenceMatcher(a=old_keys, b=new_keys, autojunk=False)
+    blocks = [block for block in matcher.get_matching_blocks() if block.size]
+    if not blocks:
+        return None
+    # How far a later match may drift when words were inserted or dropped.
+    tolerance = max(8, len(new_words) // 3)
     scores: dict[int, int] = {}
-    for block in matcher.get_matching_blocks():
-        if block.size == 0:
-            continue
-        splice = block.a - block.b
+    for anchor in blocks:
+        splice = anchor.a - anchor.b
         if splice < 0 or splice > len(old_words):
             continue
         replaced = len(old_words) - splice
         if replaced > len(new_words) + 12:
             continue
-        scores[splice] = scores.get(splice, 0) + block.size
+        score = 0
+        prev_a_end = None
+        prev_b_end = None
+        for block in blocks:
+            if block.a < splice or block.b < anchor.b:
+                continue
+            if prev_a_end is not None:
+                # A stray repeated word far from the overlap is not a rewrite.
+                if block.a - prev_a_end > 4 or block.b - prev_b_end > 5:
+                    continue
+            drift = splice + block.b - block.a
+            if not -6 <= drift <= tolerance:
+                continue
+            score += block.size
+            prev_a_end = block.a + block.size
+            prev_b_end = block.b + block.size
+        scores[splice] = max(scores.get(splice, 0), score)
     if not scores:
         return None
     need = _match_needed(len(old_words), len(new_words))
@@ -89,6 +109,7 @@ class Stitcher:
 
     def update(self, bubble: str) -> str:
         bubble = normalize(bubble)
+        self._collapse_rewritten_prefix()
         if not bubble or bubble == self.window:
             return self.transcript
         if not self.transcript:
@@ -109,7 +130,24 @@ class Stitcher:
             merged = " ".join(old_words[: offset + splice] + new_words)
             self.transcript = f"{before}{sep}{merged}" if sep else merged
         self.window = bubble
+        self._collapse_rewritten_prefix()
         return self._trimmed()
+
+    def _collapse_rewritten_prefix(self) -> None:
+        """Drop a paragraph when the next one is that same caption, rewritten."""
+        while "\n" in self.transcript:
+            before, _, last = self.transcript.rpartition("\n")
+            prev_before, sep, prev = before.rpartition("\n")
+            prev_words = prev.split()
+            last_words = last.split()
+            splice = _best_splice(prev_words, last_words)
+            if splice is None or splice > 3:
+                return
+            merged = " ".join(prev_words[:splice] + last_words)
+            collapsed = f"{prev_before}{sep}{merged}" if sep else merged
+            if collapsed == self.transcript:
+                return
+            self.transcript = collapsed
 
     def _trimmed(self) -> str:
         if len(self.transcript) <= MAX_TRANSCRIPT_CHARS:
